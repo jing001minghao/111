@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 背景圆 -->
+    <path
+        android:fillColor="#1976D2"
+        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+
+    <!-- 快进图标 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,34l24,18l-24,18z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M63,34l4,0l0,36l-4,0z" />
+
+</vector>

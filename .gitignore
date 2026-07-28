@@ -1,0 +1,23 @@
+# Android
+*.apk
+*.aab
+*.dex
+*.class
+bin/
+gen/
+out/
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+*.log
+*.hprof
+.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gradle
+!gradle/wrapper/gradle-wrapper.jar
