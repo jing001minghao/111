@@ -24,27 +24,24 @@ public class AdSkipService extends AccessibilityService {
     private static final String TAG = "AdSkipService";
     private static final String PREFS_NAME = "adskip_prefs";
 
-    // 跳过按钮的常见文本关键词（支持正则匹配）
+    // 跳过按钮的常见文本关键词（精确匹配，避免误判）
     private static final Pattern[] SKIP_PATTERNS = {
-            Pattern.compile(".*跳过.*"),
-            Pattern.compile(".*SKIP.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*跳过广告.*"),
-            Pattern.compile(".*关闭.*"),
-            Pattern.compile(".*关闭广告.*"),
-            Pattern.compile(".*点击跳过.*"),
-            Pattern.compile(".*skip.*ad.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*\u00d7.*"),  // × 关闭按钮
+            Pattern.compile("^(跳过|跳过广告|SKIP|Skip|skip|关闭广告)$"),
+            // 5s 格式的倒计时跳过，如 "跳过 5s"、"跳过4s"、"5s跳过"
+            Pattern.compile("^跳过\\s*\\d+\\s*s?$"),
+            Pattern.compile("^\\d+\\s*s?\\s*跳过$"),
+            Pattern.compile("^\\d+\\s*s$"),  // 纯倒计时 "5s"
     };
 
     // 跳过按钮的常见 resource-id 关键词
     private static final Pattern[] SKIP_ID_PATTERNS = {
             Pattern.compile(".*skip.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*close.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*dismiss.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*ad_skip.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*tt_skip.*", Pattern.CASE_INSENSITIVE),   // 穿山甲广告
             Pattern.compile(".*gdt_skip.*", Pattern.CASE_INSENSITIVE),  // 优量汇广告
             Pattern.compile(".*ksad.*skip.*", Pattern.CASE_INSENSITIVE), // 快手广告
+            Pattern.compile(".*ad_skip.*", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(".*splash_skip.*", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(".*close_ad.*", Pattern.CASE_INSENSITIVE),
     };
 
     // 已处理过的窗口，避免重复点击
@@ -107,47 +104,79 @@ public class AdSkipService extends AccessibilityService {
         // 递归搜索所有可点击的节点
         findClickableNodes(root, candidates);
 
-        // 按优先级排序：优先匹配文本，其次匹配 ID
+        // 按优先级排序：优先匹配特定 ID，其次匹配文本
         for (AccessibilityNodeInfo node : candidates) {
+
+            // 排除自己 App 的节点
+            String nodePkg = node.getPackageName() != null ? node.getPackageName().toString() : "";
+            if (nodePkg.equals(getPackageName())) continue;
+
             CharSequence text = node.getText();
             String viewId = node.getViewIdResourceName();
             CharSequence contentDesc = node.getContentDescription();
 
-            // 检查文本内容
-            if (text != null && text.length() > 0) {
+            // 尺寸检查：跳过按钮通常不大（排除全屏误判）
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            int width = bounds.width();
+            int height = bounds.height();
+            if (width <= 0 || height <= 0) {
+                node.recycle();
+                continue;
+            }
+            int screenWidth = getResources().getDisplayMetrics().widthPixels;
+            int screenHeight = getResources().getDisplayMetrics().heightPixels;
+            if (width > screenWidth * 0.6 || height > screenHeight * 0.5) {
+                node.recycle();
+                continue;
+            }
+
+            boolean matched = false;
+
+            // 优先检查 resource-id（最可靠）
+            if (viewId != null && !viewId.isEmpty()) {
+                for (Pattern p : SKIP_ID_PATTERNS) {
+                    if (p.matcher(viewId).matches()) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            // 检查文本内容（限制长度，避免大段文字误匹配）
+            if (!matched && text != null && text.length() > 0) {
                 String textStr = text.toString().trim();
-                for (Pattern p : SKIP_PATTERNS) {
-                    if (p.matcher(textStr).matches()) {
-                        return node; // 直接返回第一个匹配的
+                if (textStr.length() <= 10) {
+                    for (Pattern p : SKIP_PATTERNS) {
+                        if (p.matcher(textStr).matches()) {
+                            matched = true;
+                            break;
+                        }
                     }
                 }
             }
 
             // 检查 contentDescription
-            if (contentDesc != null && contentDesc.length() > 0) {
+            if (!matched && contentDesc != null && contentDesc.length() > 0) {
                 String descStr = contentDesc.toString().trim();
-                for (Pattern p : SKIP_PATTERNS) {
-                    if (p.matcher(descStr).matches()) {
-                        return node;
+                if (descStr.length() <= 10) {
+                    for (Pattern p : SKIP_PATTERNS) {
+                        if (p.matcher(descStr).matches()) {
+                            matched = true;
+                            break;
+                        }
                     }
                 }
             }
 
-            // 检查 resource-id
-            if (viewId != null && !viewId.isEmpty()) {
-                for (Pattern p : SKIP_ID_PATTERNS) {
-                    if (p.matcher(viewId).matches()) {
-                        return node;
-                    }
-                }
+            if (matched) {
+                // 回收其他未匹配的节点
+                candidates.stream().filter(n -> n != node).forEach(n -> {
+                    if (n != null) n.recycle();
+                });
+                return node;
             }
-        }
-
-        // 清理未被选中的节点
-        for (AccessibilityNodeInfo node : candidates) {
-            if (node != null) {
-                node.recycle();
-            }
+            node.recycle();
         }
 
         return null;
