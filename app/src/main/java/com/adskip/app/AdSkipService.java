@@ -2,11 +2,15 @@ package com.adskip.app;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
-import android.os.Bundle;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -22,182 +26,141 @@ import java.util.regex.Pattern;
 public class AdSkipService extends AccessibilityService {
 
     private static final String TAG = "AdSkipService";
+    private static final String CHANNEL_ID = "adskip_foreground";
+    private static final int NOTIFICATION_ID = 1;
     private static final String PREFS_NAME = "adskip_prefs";
 
     // 跳过按钮的常见文本关键词（精确匹配，避免误判）
     private static final Pattern[] SKIP_PATTERNS = {
             Pattern.compile("^(跳过|跳过广告|SKIP|Skip|skip|关闭广告)$"),
-            // 5s 格式的倒计时跳过，如 "跳过 5s"、"跳过4s"、"5s跳过"
             Pattern.compile("^跳过\\s*\\d+\\s*s?$"),
             Pattern.compile("^\\d+\\s*s?\\s*跳过$"),
-            Pattern.compile("^\\d+\\s*s$"),  // 纯倒计时 "5s"
+            Pattern.compile("^\\d+\\s*s$"),
     };
 
     // 跳过按钮的常见 resource-id 关键词
     private static final Pattern[] SKIP_ID_PATTERNS = {
             Pattern.compile(".*skip.*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile(".*tt_skip.*", Pattern.CASE_INSENSITIVE),   // 穿山甲广告
-            Pattern.compile(".*gdt_skip.*", Pattern.CASE_INSENSITIVE),  // 优量汇广告
-            Pattern.compile(".*ksad.*skip.*", Pattern.CASE_INSENSITIVE), // 快手广告
+            Pattern.compile(".*tt_skip.*", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(".*gdt_skip.*", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(".*ksad.*skip.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*ad_skip.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*splash_skip.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*close_ad.*", Pattern.CASE_INSENSITIVE),
     };
 
-    // 已处理过的窗口，避免重复点击
-    private String lastClickedWindowId = "";
     private long lastClickTime = 0;
-    private static final long CLICK_COOLDOWN_MS = 1500; // 1.5秒冷却时间
+    private static final long CLICK_COOLDOWN_MS = 2000;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
 
         int eventType = event.getEventType();
-        String packageName = event.getPackageName() != null ? event.getPackageName().toString() : "";
-
-        // 过滤掉系统界面和自己
-        if (packageName.equals(getPackageName()) ||
-                packageName.equals("com.android.systemui") ||
-                packageName.contains("launcher")) {
+        // 只处理窗口切换事件，不处理内容变化（大幅减少触发频率）
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             return;
         }
 
-        // 只处理窗口状态变化和内容变化事件
-        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+        String eventPkg = event.getPackageName() != null ? event.getPackageName().toString() : "";
+        if (eventPkg.equals(getPackageName()) ||
+                eventPkg.equals("com.android.systemui") ||
+                eventPkg.contains("launcher")) {
             return;
         }
 
-        // 冷却时间检查
         long now = System.currentTimeMillis();
         if (now - lastClickTime < CLICK_COOLDOWN_MS) {
             return;
         }
 
-        // 查找跳过按钮
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
 
         try {
+            // 二次过滤：root 窗口包名也必须不是自己
+            CharSequence rootPkg = root.getPackageName();
+            if (rootPkg != null && rootPkg.toString().equals(getPackageName())) {
+                root.recycle();
+                return;
+            }
+
             AccessibilityNodeInfo skipNode = findSkipButton(root);
             if (skipNode != null) {
                 performClick(skipNode);
                 lastClickTime = now;
-                Log.d(TAG, "自动点击跳过按钮: " + skipNode.getText() + " in " + packageName);
+                Log.d(TAG, "点击跳过: " + skipNode.getText() + " @ " + eventPkg);
             }
-        } catch (Exception e) {
-            Log.e(TAG, "查找跳过按钮出错", e);
         } finally {
             root.recycle();
         }
     }
 
-    /**
-     * 在节点树中递归查找跳过按钮
-     */
     private AccessibilityNodeInfo findSkipButton(AccessibilityNodeInfo root) {
         if (root == null) return null;
 
         List<AccessibilityNodeInfo> candidates = new ArrayList<>();
-
-        // 递归搜索所有可点击的节点
         findClickableNodes(root, candidates);
 
-        // 按优先级排序：优先匹配特定 ID，其次匹配文本
         for (AccessibilityNodeInfo node : candidates) {
-
             // 排除自己 App 的节点
             String nodePkg = node.getPackageName() != null ? node.getPackageName().toString() : "";
-            if (nodePkg.equals(getPackageName())) continue;
+            if (nodePkg.isEmpty() || nodePkg.equals(getPackageName())) {
+                node.recycle();
+                continue;
+            }
 
             CharSequence text = node.getText();
             String viewId = node.getViewIdResourceName();
             CharSequence contentDesc = node.getContentDescription();
 
-            // 尺寸检查：跳过按钮通常不大（排除全屏误判）
+            // 尺寸检查
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
-            int width = bounds.width();
-            int height = bounds.height();
-            if (width <= 0 || height <= 0) {
-                node.recycle();
-                continue;
-            }
-            int screenWidth = getResources().getDisplayMetrics().widthPixels;
-            int screenHeight = getResources().getDisplayMetrics().heightPixels;
-            if (width > screenWidth * 0.6 || height > screenHeight * 0.5) {
-                node.recycle();
-                continue;
-            }
+            int w = bounds.width();
+            int h = bounds.height();
+            if (w <= 0 || h <= 0) { node.recycle(); continue; }
+            int sw = getResources().getDisplayMetrics().widthPixels;
+            int sh = getResources().getDisplayMetrics().heightPixels;
+            if (w > sw * 0.6 || h > sh * 0.5) { node.recycle(); continue; }
 
             boolean matched = false;
 
-            // 优先检查 resource-id（最可靠）
             if (viewId != null && !viewId.isEmpty()) {
                 for (Pattern p : SKIP_ID_PATTERNS) {
-                    if (p.matcher(viewId).matches()) {
-                        matched = true;
-                        break;
-                    }
+                    if (p.matcher(viewId).matches()) { matched = true; break; }
                 }
             }
-
-            // 检查文本内容（限制长度，避免大段文字误匹配）
-            if (!matched && text != null && text.length() > 0) {
-                String textStr = text.toString().trim();
-                if (textStr.length() <= 10) {
-                    for (Pattern p : SKIP_PATTERNS) {
-                        if (p.matcher(textStr).matches()) {
-                            matched = true;
-                            break;
-                        }
-                    }
+            if (!matched && text != null && text.length() > 0 && text.length() <= 10) {
+                String s = text.toString().trim();
+                for (Pattern p : SKIP_PATTERNS) {
+                    if (p.matcher(s).matches()) { matched = true; break; }
                 }
             }
-
-            // 检查 contentDescription
-            if (!matched && contentDesc != null && contentDesc.length() > 0) {
-                String descStr = contentDesc.toString().trim();
-                if (descStr.length() <= 10) {
-                    for (Pattern p : SKIP_PATTERNS) {
-                        if (p.matcher(descStr).matches()) {
-                            matched = true;
-                            break;
-                        }
-                    }
+            if (!matched && contentDesc != null && contentDesc.length() > 0 && contentDesc.length() <= 10) {
+                String s = contentDesc.toString().trim();
+                for (Pattern p : SKIP_PATTERNS) {
+                    if (p.matcher(s).matches()) { matched = true; break; }
                 }
             }
 
             if (matched) {
-                // 回收其他未匹配的节点
-                candidates.stream().filter(n -> n != node).forEach(n -> {
-                    if (n != null) n.recycle();
-                });
+                for (AccessibilityNodeInfo n : candidates) {
+                    if (n != node && n != null) n.recycle();
+                }
                 return node;
             }
             node.recycle();
         }
-
         return null;
     }
 
-    /**
-     * 递归收集所有可点击的叶子节点
-     */
     private void findClickableNodes(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> result) {
         if (node == null) return;
-
-        // 只关注可点击的节点
-        if (node.isClickable()) {
-            // 限制搜索深度，避免过多节点
-            if (result.size() < 200) {
-                result.add(AccessibilityNodeInfo.obtain(node));
-            }
+        if (node.isClickable() && result.size() < 200) {
+            result.add(AccessibilityNodeInfo.obtain(node));
         }
-
-        int childCount = node.getChildCount();
-        for (int i = 0; i < childCount && result.size() < 200; i++) {
+        for (int i = 0; i < node.getChildCount() && result.size() < 200; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
                 findClickableNodes(child, result);
@@ -206,46 +169,59 @@ public class AdSkipService extends AccessibilityService {
         }
     }
 
-    /**
-     * 通过无障碍手势模拟点击
-     */
     private void performClick(AccessibilityNodeInfo node) {
         if (node == null) return;
-
-        // 首选 performAction 方式
-        if (node.isClickable()) {
-            boolean success = node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            if (success) {
-                return;
-            }
+        if (node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return;
         }
-
-        // 备用方案：使用手势点击节点中心
+        // 备用手势点击
         Rect rect = new Rect();
         node.getBoundsInScreen(rect);
-        float centerX = rect.centerX();
-        float centerY = rect.centerY();
-
-        Path clickPath = new Path();
-        clickPath.moveTo(centerX, centerY);
-
-        GestureDescription.Builder gestureBuilder = new GestureDescription.Builder();
-        gestureBuilder.addStroke(new GestureDescription.StrokeDescription(clickPath, 0, 50));
-
-        dispatchGesture(gestureBuilder.build(), null, null);
-    }
-
-    @Override
-    public void onInterrupt() {
-        Log.d(TAG, "无障碍服务被中断");
+        Path path = new Path();
+        path.moveTo(rect.centerX(), rect.centerY());
+        GestureDescription.Builder gb = new GestureDescription.Builder();
+        gb.addStroke(new GestureDescription.StrokeDescription(path, 0, 50));
+        dispatchGesture(gb.build(), null, null);
     }
 
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
-        Log.d(TAG, "无障碍服务已连接");
+        Log.d(TAG, "服务已连接");
+        startForegroundNotification();
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         prefs.edit().putBoolean("service_enabled", true).apply();
+    }
+
+    /**
+     * 启动前台通知，防止被 ColorOS 杀掉
+     */
+    private void startForegroundNotification() {
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID, "广告跳过", NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("广告跳过服务运行中");
+        channel.setShowBadge(false);
+        nm.createNotificationChannel(channel);
+
+        Intent intent = new Intent(this, MainActivity.class);
+        PendingIntent pi = PendingIntent.getActivity(
+                this, 0, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("广告跳过")
+                .setContentText("自动跳过广告服务运行中")
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                .build();
+
+        startForeground(NOTIFICATION_ID, notification);
+    }
+
+    @Override
+    public void onInterrupt() {
+        Log.d(TAG, "服务被中断");
     }
 
     @Override
