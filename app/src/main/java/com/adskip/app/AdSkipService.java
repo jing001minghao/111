@@ -21,11 +21,8 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * 广告跳过无障碍服务 v2.0
- * - 位置优先扫描（右上角优先）
- * - 延迟 + 二次确认
- * - 倒计时智能点击
- * - 兜底盲点
+ * 广告跳过无障碍服务 v1.2.0
+ * 秒点版：找到跳过按钮立即点击，content change + 重复扫描确保不漏
  */
 public class AdSkipService extends AccessibilityService {
 
@@ -36,7 +33,7 @@ public class AdSkipService extends AccessibilityService {
 
     // ==== 匹配关键词 ====
     private static final Pattern[] SKIP_PATTERNS = {
-            Pattern.compile("^(跳过|跳过广告|SKIP|Skip|skip|关闭广告|点击关闭|我知道了|我已知晓|同意并继续|关闭)$"),
+            Pattern.compile("^(跳过|跳过广告|SKIP|Skip|skip|关闭广告|点击关闭|我知道了|我已知晓|同意并继续|关闭|立即跳过|马上跳过)$"),
             Pattern.compile("^(Close|Dismiss|Got it|Agree|OK)$", Pattern.CASE_INSENSITIVE),
             Pattern.compile("^跳过\\s*\\d+\\s*s?$"),
             Pattern.compile("^\\d+\\s*s?\\s*跳过$"),
@@ -52,26 +49,27 @@ public class AdSkipService extends AccessibilityService {
             Pattern.compile(".*splash_skip.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*close_ad.*", Pattern.CASE_INSENSITIVE),
             Pattern.compile(".*dismiss.*", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(".*tt_splash.*", Pattern.CASE_INSENSITIVE),
     };
 
     // ==== 状态 ====
     private final Handler handler = new Handler(Looper.getMainLooper());
     private long lastClickTime = 0;
-    private static final long CLICK_COOLDOWN_MS = 2500;
+    private static final long CLICK_COOLDOWN_MS = 2000;
+
+    // 内容变化防抖
+    private long lastContentChangeTime = 0;
+    private static final long CONTENT_DEBOUNCE_MS = 150;
+
+    // 当前窗口的扫描计数
+    private String currentWindowId = "";
+    private int scanCount = 0;
+    private static final int MAX_SCANS = 4;
 
     // 倒计时追踪
     private CountdownTracker countdownTracker = null;
 
-    // 延迟扫描状态
-    private boolean scanPending = false;
-    private AccessibilityNodeInfo pendingRoot = null;
-
-    // 二次确认状态
-    private Rect lastCandidateRect = null;
-    private long lastCandidateTime = 0;
-    private static final long CONFIRM_INTERVAL_MS = 150;
-
-    // 盲点已执行标记（同一窗口不重复盲点）
+    // 盲点窗口记录
     private String lastBlindWindowId = "";
 
     @Override
@@ -93,104 +91,98 @@ public class AdSkipService extends AccessibilityService {
         long now = System.currentTimeMillis();
         if (now - lastClickTime < CLICK_COOLDOWN_MS) return;
 
-        // 倒计时追踪：检查是否是倒计时文本变化
+        // 倒计时追踪
         if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && countdownTracker != null) {
             CharSequence eventText = event.getText() != null && event.getText().size() > 0
                     ? event.getText().get(0) : null;
             if (eventText != null && countdownTracker.update(eventText.toString().trim())) {
-                Log.d(TAG, "倒计时递减: " + countdownTracker.currentValue);
                 if (countdownTracker.shouldClick()) {
                     performBlindClick(countdownTracker.rect);
                     countdownTracker = null;
                     lastClickTime = now;
+                    Log.d(TAG, "倒计时到1s，点击");
                 }
                 return;
             }
         }
 
-        // 窗口切换 → 延迟扫描
+        // 窗口切换：重置扫描状态，启动多轮扫描
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
-            if (root == null) return;
-
-            CharSequence rootPkg = root.getPackageName();
-            if (rootPkg != null && rootPkg.toString().equals(getPackageName())) {
-                root.recycle();
-                return;
-            }
-
-            // 取消之前的延迟任务
             handler.removeCallbacks(scanRunnable);
             handler.removeCallbacks(blindClickRunnable);
-
-            // 重置二次确认
-            lastCandidateRect = null;
             countdownTracker = null;
-
-            // 300ms 后扫描
-            pendingRoot = root;
-            handler.postDelayed(scanRunnable, 300);
-
-            // 1 秒后兜底盲点（如果还没成功跳过）
-            String windowId = Integer.toHexString(root.hashCode());
-            if (!windowId.equals(lastBlindWindowId)) {
-                handler.postDelayed(blindClickRunnable, 1000);
-            }
+            currentWindowId = eventPkg + "_" + now;
+            scanCount = 0;
+            scheduleScan(100);  // 首扫 100ms 快速响应
+            handler.postDelayed(blindClickRunnable, 1500);
         }
+
+        // 内容变化：防抖触发扫描（关键的修复）
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            if (now - lastContentChangeTime < CONTENT_DEBOUNCE_MS) return;
+            lastContentChangeTime = now;
+            handler.removeCallbacks(scanRunnable);
+            scheduleScan(50);  // 内容变化后马上扫
+        }
+    }
+
+    /**
+     * 安排一次扫描，扫不到会递归重试
+     */
+    private void scheduleScan(long delay) {
+        if (scanCount >= MAX_SCANS) return;
+        scanCount++;
+        handler.postDelayed(scanRunnable, delay);
     }
 
     private final Runnable scanRunnable = new Runnable() {
         @Override
         public void run() {
-            if (pendingRoot == null) return;
+            if (System.currentTimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) return;
+
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return;
+
             try {
-                AccessibilityNodeInfo skipNode = findSkipButton(pendingRoot);
+                CharSequence rootPkg = root.getPackageName();
+                if (rootPkg != null && rootPkg.toString().equals(getPackageName())) return;
+
+                AccessibilityNodeInfo skipNode = findSkipButton(root);
                 if (skipNode != null) {
-                    // 二次确认
-                    Rect bounds = new Rect();
-                    skipNode.getBoundsInScreen(bounds);
+                    // 找到→秒点
+                    CharSequence text = skipNode.getText();
 
-                    if (lastCandidateRect != null &&
-                            Math.abs(bounds.centerX() - lastCandidateRect.centerX()) < 20 &&
-                            Math.abs(bounds.centerY() - lastCandidateRect.centerY()) < 20 &&
-                            System.currentTimeMillis() - lastCandidateTime < CONFIRM_INTERVAL_MS + 100) {
-                        // 两次找到同一位置 → 确认点击
-                        performClick(skipNode);
-                        lastClickTime = System.currentTimeMillis();
-                        lastCandidateRect = null;
-                        countdownTracker = null;
-                        handler.removeCallbacks(blindClickRunnable);
-                        Log.d(TAG, "二次确认通过，点击跳过");
-                    } else {
-                        // 第一次找到 → 记录位置，200ms 后再扫一次
-                        lastCandidateRect = bounds;
-                        lastCandidateTime = System.currentTimeMillis();
-                        skipNode.recycle();
-
-                        // 检查是否是倒计时按钮（如 "跳过 5s"）
-                        CharSequence text = skipNode.getText();
-                        if (text != null && countdownTracker == null) {
-                            String s = text.toString().trim();
-                            java.util.regex.Matcher m = Pattern.compile("(\\d+)\\s*s?").matcher(s);
-                            if (m.find()) {
-                                int val = Integer.parseInt(m.group(1));
-                                if (val > 1) {
-                                    countdownTracker = new CountdownTracker(bounds, val);
-                                    Log.d(TAG, "检测到倒计时跳过: " + val + "s");
-                                }
+                    // 检查是否是倒计时按钮
+                    if (text != null) {
+                        String s = text.toString().trim();
+                        java.util.regex.Matcher m = Pattern.compile("(\\d+)\\s*s?").matcher(s);
+                        if (m.find()) {
+                            int val = Integer.parseInt(m.group(1));
+                            if (val > 1) {
+                                Rect bounds = new Rect();
+                                skipNode.getBoundsInScreen(bounds);
+                                countdownTracker = new CountdownTracker(bounds, val);
+                                Log.d(TAG, "倒计时" + val + "s，等待递减");
+                                skipNode.recycle();
+                                return;
                             }
                         }
-
-                        handler.postDelayed(scanRunnable, CONFIRM_INTERVAL_MS);
                     }
-                } else {
-                    lastCandidateRect = null;
+
+                    // 非倒计时→直接点
+                    performClick(skipNode);
+                    lastClickTime = System.currentTimeMillis();
+                    handler.removeCallbacks(blindClickRunnable);
+                    Log.d(TAG, "秒点跳过按钮: " + text);
+                    return;
+                }
+
+                // 没找到→重试
+                if (scanCount < MAX_SCANS) {
+                    scheduleScan(200);
                 }
             } finally {
-                if (pendingRoot != null) {
-                    pendingRoot.recycle();
-                    pendingRoot = null;
-                }
+                root.recycle();
             }
         }
     };
@@ -199,14 +191,12 @@ public class AdSkipService extends AccessibilityService {
         @Override
         public void run() {
             if (System.currentTimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) return;
-            Log.d(TAG, "执行兜底盲点");
+            if (currentWindowId.equals(lastBlindWindowId)) return;
+            lastBlindWindowId = currentWindowId;
+            Log.d(TAG, "兜底盲点");
             int sw = getResources().getDisplayMetrics().widthPixels;
-            Rect blindRect = new Rect(sw - 160, 0, sw, 180);
+            Rect blindRect = new Rect(sw - 140, 10, sw - 10, 120);
             performBlindClick(blindRect);
-            if (pendingRoot != null) {
-                int windowId = pendingRoot.hashCode();
-                lastBlindWindowId = Integer.toHexString(windowId);
-            }
         }
     };
 
@@ -218,31 +208,26 @@ public class AdSkipService extends AccessibilityService {
         if (root == null) return null;
 
         int sw = getResources().getDisplayMetrics().widthPixels;
-        int zoneRight = sw;
-        int zoneLeft = (int) (sw * 0.55);
-        int zoneTop = 0;
-        int zoneBottom = (int) (getResources().getDisplayMetrics().heightPixels * 0.35);
+        int sh = getResources().getDisplayMetrics().heightPixels;
 
-        // 第一轮：右上角优先扫描
-        List<AccessibilityNodeInfo> zoneNodes = new ArrayList<>();
-        findClickableNodesInZone(root, zoneLeft, zoneTop, zoneRight, zoneBottom, zoneNodes, 200);
-        AccessibilityNodeInfo result = matchNodes(zoneNodes);
-        if (result != null) {
-            recycleOthers(zoneNodes, result);
-            return result;
-        }
-        recycleAll(zoneNodes);
+        // 第一轮：右上角
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        findClickableNodesInZone(root, (int)(sw*0.55), 0, sw, (int)(sh*0.4), nodes);
+        AccessibilityNodeInfo result = matchNodes(nodes);
+        if (result != null) { recycleOthers(nodes, result); return result; }
+        recycleAll(nodes);
 
-        // 第二轮：全屏扫描
-        List<AccessibilityNodeInfo> allNodes = new ArrayList<>();
-        findClickableNodes(root, allNodes);
-        result = matchNodes(allNodes);
-        if (result != null) {
-            recycleOthers(allNodes, result);
-            return result;
-        }
-        recycleAll(allNodes);
-        return null;
+        // 第二轮：右下角
+        nodes.clear();
+        findClickableNodesInZone(root, (int)(sw*0.55), (int)(sh*0.55), sw, sh, nodes);
+        result = matchNodes(nodes);
+        if (result != null) { recycleOthers(nodes, result); return result; }
+        recycleAll(nodes);
+
+        // 第三轮：全屏
+        nodes.clear();
+        findClickableNodes(root, nodes);
+        return matchNodes(nodes);
     }
 
     private AccessibilityNodeInfo matchNodes(List<AccessibilityNodeInfo> nodes) {
@@ -257,22 +242,23 @@ public class AdSkipService extends AccessibilityService {
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
             if (bounds.width() <= 0 || bounds.height() <= 0) continue;
+            // 放宽尺寸限制，只排除全屏视图
             int sw = getResources().getDisplayMetrics().widthPixels;
             int sh = getResources().getDisplayMetrics().heightPixels;
-            if (bounds.width() > sw * 0.6 || bounds.height() > sh * 0.5) continue;
+            if (bounds.width() > sw * 0.7 || bounds.height() > sh * 0.6) continue;
 
             if (viewId != null && !viewId.isEmpty()) {
                 for (Pattern p : SKIP_ID_PATTERNS) {
                     if (p.matcher(viewId).matches()) return node;
                 }
             }
-            if (text != null && text.length() > 0 && text.length() <= 10) {
+            if (text != null && text.length() > 0 && text.length() <= 15) {
                 String s = text.toString().trim();
                 for (Pattern p : SKIP_PATTERNS) {
                     if (p.matcher(s).matches()) return node;
                 }
             }
-            if (contentDesc != null && contentDesc.length() > 0 && contentDesc.length() <= 10) {
+            if (contentDesc != null && contentDesc.length() > 0 && contentDesc.length() <= 15) {
                 String s = contentDesc.toString().trim();
                 for (Pattern p : SKIP_PATTERNS) {
                     if (p.matcher(s).matches()) return node;
@@ -284,21 +270,24 @@ public class AdSkipService extends AccessibilityService {
 
     private void findClickableNodesInZone(AccessibilityNodeInfo node,
                                            int zl, int zt, int zr, int zb,
-                                           List<AccessibilityNodeInfo> result, int max) {
-        if (node == null || result.size() >= max) return;
+                                           List<AccessibilityNodeInfo> result) {
+        if (node == null || result.size() >= 200) return;
         if (node.isClickable()) {
             Rect b = new Rect();
             node.getBoundsInScreen(b);
-            if (b.width() >= 20 && b.height() >= 20 &&
-                    b.width() <= 300 && b.height() <= 150 &&
-                    b.left >= zl && b.top >= zt && b.right <= zr && b.bottom <= zb) {
-                result.add(AccessibilityNodeInfo.obtain(node));
+            if (b.width() >= 15 && b.height() >= 15 &&
+                    b.right >= zl && b.bottom >= zt &&
+                    b.left <= zr && b.top <= zb) {
+                // 放宽判断：区域有交集即可
+                if (b.left < zr && b.right > zl && b.top < zb && b.bottom > zt) {
+                    result.add(AccessibilityNodeInfo.obtain(node));
+                }
             }
         }
-        for (int i = 0; i < node.getChildCount() && result.size() < max; i++) {
+        for (int i = 0; i < node.getChildCount() && result.size() < 200; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                findClickableNodesInZone(child, zl, zt, zr, zb, result, max);
+                findClickableNodesInZone(child, zl, zt, zr, zb, result);
                 child.recycle();
             }
         }
@@ -306,10 +295,10 @@ public class AdSkipService extends AccessibilityService {
 
     private void findClickableNodes(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> result) {
         if (node == null) return;
-        if (node.isClickable() && result.size() < 200) {
+        if (node.isClickable() && result.size() < 300) {
             result.add(AccessibilityNodeInfo.obtain(node));
         }
-        for (int i = 0; i < node.getChildCount() && result.size() < 200; i++) {
+        for (int i = 0; i < node.getChildCount() && result.size() < 300; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
                 findClickableNodes(child, result);
@@ -325,7 +314,6 @@ public class AdSkipService extends AccessibilityService {
     private void performClick(AccessibilityNodeInfo node) {
         if (node == null) return;
         if (node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return;
-
         Rect rect = new Rect();
         node.getBoundsInScreen(rect);
         performBlindClick(rect);
@@ -358,7 +346,6 @@ public class AdSkipService extends AccessibilityService {
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
-        Log.d(TAG, "服务已连接");
         startForegroundNotification();
         startHealthCheckService();
     }
@@ -376,7 +363,7 @@ public class AdSkipService extends AccessibilityService {
 
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("广告跳过")
-                .setContentText("自动跳过广告服务运行中")
+                .setContentText("秒点服务运行中")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(pi)
                 .setOngoing(true)
@@ -415,7 +402,6 @@ public class AdSkipService extends AccessibilityService {
             this.currentValue = initialValue;
         }
 
-        /** 返回 true 表示数值递减了 */
         boolean update(String text) {
             java.util.regex.Matcher m = Pattern.compile("(\\d+)").matcher(text);
             if (m.find()) {
