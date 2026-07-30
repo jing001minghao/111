@@ -1,17 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 前台服务权限（防 ColorOS 杀进程） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AdSkip">
+        android:theme="@style/Theme.AdSkip"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
@@ -37,7 +39,18 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- 开机广播接收器 -->
+        <!-- 保活前台服务 -->
+        <service
+            android:name=".HealthCheckService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- 心跳广播接收器 -->
+        <receiver
+            android:name=".HealthCheckReceiver"
+            android:exported="false" />
+
+        <!-- 开机接收器 -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

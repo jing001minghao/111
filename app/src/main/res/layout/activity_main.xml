@@ -1,114 +1,181 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="24dp"
-    android:gravity="center_horizontal"
     android:background="#FAFAFA">
 
-    <!-- 图标 -->
-    <View
-        android:layout_width="80dp"
-        android:layout_height="80dp"
-        android:layout_marginTop="60dp"
-        android:layout_marginBottom="24dp"
-        android:background="@drawable/ic_app_icon" />
-
-    <!-- 标题 -->
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="广告跳过"
-        android:textSize="28sp"
-        android:textColor="#212121"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="自动检测并点击「跳过」按钮"
-        android:textSize="14sp"
-        android:textColor="#757575"
-        android:layout_marginBottom="32dp" />
-
-    <!-- 状态卡片 -->
-    <androidx.cardview.widget.CardView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="24dp"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="2dp">
+        android:orientation="vertical"
+        android:padding="24dp"
+        android:gravity="center_horizontal">
 
-        <LinearLayout
+        <!-- 图标 -->
+        <View
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:layout_marginTop="40dp"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/ic_app_icon" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="广告跳过"
+            android:textSize="28sp"
+            android:textColor="#212121"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="自动检测并点击广告跳过按钮"
+            android:textSize="14sp"
+            android:textColor="#757575"
+            android:layout_marginBottom="24dp" />
+
+        <!-- 状态卡片 -->
+        <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="20dp">
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp">
 
-            <TextView
-                android:id="@+id/tv_status"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textSize="18sp"
-                android:textStyle="bold"
-                android:layout_marginBottom="12dp"
-                android:text="○ 服务未启动" />
+                android:orientation="vertical"
+                android:padding="20dp">
 
-            <TextView
-                android:id="@+id/tv_guide"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="14sp"
-                android:textColor="#616161"
-                android:lineSpacingExtra="4dp"
-                android:text="点击下方按钮开启服务" />
-        </LinearLayout>
-    </androidx.cardview.widget.CardView>
+                <TextView
+                    android:id="@+id/tv_status"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp"
+                    android:text="○ 服务未启动" />
 
-    <!-- 操作按钮 -->
-    <Button
-        android:id="@+id/btn_toggle"
-        android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:text="开启无障碍服务"
-        android:textSize="16sp"
-        android:textColor="#FFFFFF"
-        android:backgroundTint="#1976D2"
-        android:layout_marginBottom="16dp" />
+                <TextView
+                    android:id="@+id/tv_guide"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp"
+                    android:textColor="#616161"
+                    android:lineSpacingExtra="4dp"
+                    android:text="点击下方按钮开启服务" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
 
-    <!-- 使用说明 -->
-    <androidx.cardview.widget.CardView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="1dp">
+        <!-- 操作按钮 -->
+        <Button
+            android:id="@+id/btn_toggle"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="开启无障碍服务"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#1976D2"
+            android:layout_marginBottom="12dp" />
 
-        <LinearLayout
+        <!-- ColorOS 白名单引导卡片 -->
+        <TextView
+            android:id="@+id/tv_whitelist_title"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp">
+            android:text="ColorOS 防杀后台设置（重要）"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="#E65100"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone" />
 
-            <TextView
-                android:layout_width="wrap_content"
+        <androidx.cardview.widget.CardView
+            android:id="@+id/card_whitelist"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="1dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="使用说明"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:textColor="#424242"
-                android:layout_marginBottom="8dp" />
+                android:orientation="vertical"
+                android:padding="16dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp"
+                    android:textColor="#757575"
+                    android:lineSpacingExtra="6dp"
+                    android:text="ColorOS 会杀后台进程导致服务失效，请完成以下设置：\n\n1. 应用速冻 → 关闭「广告跳过」\n2. 后台冻结 → 关闭\n3. 自启动管理 → 允许" />
+
+                <Button
+                    android:id="@+id/btn_battery"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="12dp"
+                    android:text="打开耗电管理"
+                    android:textSize="14sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#E65100"
+                    android:layout_marginBottom="8dp" />
+
+                <Button
+                    android:id="@+id/btn_autostart"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:text="打开自启动管理"
+                    android:textSize="14sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#FF8F00" />
+
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- 使用说明 -->
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textSize="13sp"
-                android:textColor="#757575"
-                android:lineSpacingExtra="4dp"
-                android:text="1. 点击上方按钮，进入无障碍设置\n2. 找到「广告跳过」并开启服务\n3. 服务开启后，打开任意 App 遇到广告时会自动点击「跳过」按钮\n4. 无需 Root，安全可靠" />
-        </LinearLayout>
-    </androidx.cardview.widget.CardView>
+                android:orientation="vertical"
+                android:padding="16dp">
 
-</LinearLayout>
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="使用说明"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="#424242"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp"
+                    android:textColor="#757575"
+                    android:lineSpacingExtra="4dp"
+                    android:text="1. 开启无障碍服务\n2. 完成上方 ColorOS 防杀设置\n3. 打开任意 App，开屏广告的「跳过」按钮将被自动点击\n4. 支持倒计时跳过（3s→2s→1s 自动点）\n5. 无需 Root，安全可靠" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="40dp" />
+
+    </LinearLayout>
+</ScrollView>
