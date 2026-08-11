@@ -30,9 +30,13 @@ public class HealthCheckReceiver extends BroadcastReceiver {
             Log.w(TAG, "无障碍服务未运行，发送提醒通知");
             sendAlertNotification(context);
 
-            // 尝试重启保活服务
-            Intent restartIntent = new Intent(context, HealthCheckService.class);
-            context.startService(restartIntent);
+            // 尝试重启保活服务（Android 8+ 后台启动需用 startForegroundService）
+            try {
+                Intent restartIntent = new Intent(context, HealthCheckService.class);
+                context.startForegroundService(restartIntent);
+            } catch (Exception e) {
+                Log.w(TAG, "重启保活服务失败: " + e.getMessage());
+            }
         } else {
             Log.d(TAG, "无障碍服务正常运行");
         }

@@ -1,15 +1,9 @@
 package com.adskip.app;
 
-import android.app.Activity;
-import android.content.Context;
-import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -28,7 +22,6 @@ import java.util.Locale;
 public class LogActivity extends AppCompatActivity {
 
     private LinearLayout container;
-    private final Handler handler = new Handler(Looper.getMainLooper());
     private SkipLogDb db;
     private PackageManager pm;
 

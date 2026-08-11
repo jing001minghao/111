@@ -80,8 +80,12 @@ public class HealthCheckService extends Service {
     public void onDestroy() {
         super.onDestroy();
         Log.d(TAG, "保活服务停止");
-        // 自动重启
-        Intent restartIntent = new Intent(this, HealthCheckService.class);
-        startService(restartIntent);
+        // 自动重启（Android 8+ 后台启动需 startForegroundService + try-catch）
+        try {
+            Intent restartIntent = new Intent(this, HealthCheckService.class);
+            startForegroundService(restartIntent);
+        } catch (Exception e) {
+            Log.w(TAG, "重启保活服务失败: " + e.getMessage());
+        }
     }
 }

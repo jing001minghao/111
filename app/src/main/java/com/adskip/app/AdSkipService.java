@@ -86,7 +86,7 @@ public class AdSkipService extends AccessibilityService {
 
         // ===== 结果判定：点击后窗口切换且包名/Activity变化 → 跳过成功 =====
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                lastClickRecordTime > 0) {
+                lastClickRecordTime > 0 && logDb != null) {
             long elapsed = System.currentTimeMillis() - lastClickRecordTime;
             if (elapsed < RESULT_TIMEOUT_MS) {
                 String activity = event.getClassName() != null ? event.getClassName().toString() : "";
@@ -137,7 +137,9 @@ public class AdSkipService extends AccessibilityService {
             AccessibilityNodeInfo skipNode = findSkipButton(root, eventPkg);
             if (skipNode != null) {
                 String matchType = lastMatchType;
+                CharSequence nodeText = skipNode.getText();  // 先取文本，recycle 前
                 performSafeClick(skipNode);
+                skipNode.recycle();  // 释放节点，防止内存泄漏
                 lastClickTime = System.currentTimeMillis();
                 handler.removeCallbacks(scanRunnable);
                 retryCount = 0;
@@ -148,13 +150,13 @@ public class AdSkipService extends AccessibilityService {
                 lastClickRecordTime = System.currentTimeMillis();
 
                 handler.postDelayed(() -> {
-                    if (lastClickRecordTime > 0) {
+                    if (lastClickRecordTime > 0 && logDb != null) {
                         logDb.markLastClickResult(false);
                         lastClickRecordTime = 0;
                     }
                 }, RESULT_TIMEOUT_MS);
 
-                Log.d(TAG, "点击跳过: " + skipNode.getText() + " [" + matchType + "]");
+                Log.d(TAG, "点击跳过: " + nodeText + " [" + matchType + "]");
                 return;
             }
 
@@ -175,7 +177,7 @@ public class AdSkipService extends AccessibilityService {
                 lastClickActivity = activity;
                 lastClickRecordTime = System.currentTimeMillis();
                 handler.postDelayed(() -> {
-                    if (lastClickRecordTime > 0) {
+                    if (lastClickRecordTime > 0 && logDb != null) {
                         logDb.markLastClickResult(false);
                         lastClickRecordTime = 0;
                     }
@@ -271,13 +273,14 @@ public class AdSkipService extends AccessibilityService {
                 }
             }
 
-            // 3. 通用文本规则（包含 + 长度）
+            // 3. 通用文本规则（包含 + 长度，text/desc 分别判断）
             for (String[] t : TEXT_RULES) {
                 String keyword = t[0];
                 int maxLen = Integer.parseInt(t[1]);
                 boolean topRightOnly = t[2].equals("1");
-                if ((text.contains(keyword) || desc.contains(keyword)) &&
-                        text.length() <= maxLen &&
+                boolean textHit = !text.isEmpty() && text.contains(keyword) && text.length() <= maxLen;
+                boolean descHit = !desc.isEmpty() && desc.contains(keyword) && desc.length() <= maxLen;
+                if ((textHit || descHit) &&
                         (!topRightOnly || inTopRight) &&
                         isSmallEnough(bounds, sw, sh)) {
                     lastMatchType = "text";
@@ -367,10 +370,11 @@ public class AdSkipService extends AccessibilityService {
 
         AccessibilityNodeInfo ancestor = findSafeClickableAncestor(node);
         if (ancestor != null) {
-            if (ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            boolean clicked = ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            ancestor.recycle();  // 无论成功失败都要回收，防止内存泄漏
+            if (clicked) {
                 return;
             }
-            ancestor.recycle();
         }
 
         Rect rect = new Rect();
@@ -455,8 +459,12 @@ public class AdSkipService extends AccessibilityService {
     }
 
     private void startHealthCheckService() {
-        Intent intent = new Intent(this, HealthCheckService.class);
-        startService(intent);
+        try {
+            Intent intent = new Intent(this, HealthCheckService.class);
+            startForegroundService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "启动保活服务失败: " + e.getMessage());
+        }
     }
 
     @Override
