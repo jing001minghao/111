@@ -25,6 +25,11 @@
             </intent-filter>
         </activity>
 
+        <!-- 测试日志页面 -->
+        <activity
+            android:name=".LogActivity"
+            android:exported="false" />
+
         <!-- 无障碍服务 -->
         <service
             android:name=".AdSkipService"

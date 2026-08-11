@@ -36,12 +36,14 @@ public class MainActivity extends AppCompatActivity {
         tvGuide = findViewById(R.id.tv_guide);
         tvWhitelistTitle = findViewById(R.id.tv_whitelist_title);
         cardWhitelist = findViewById(R.id.card_whitelist);
+        Button btnLogs = findViewById(R.id.btn_logs);
 
         updateUI();
 
         btnToggle.setOnClickListener(v -> openAccessibilitySettings());
         btnBattery.setOnClickListener(v -> openAppSettings());
         btnAutostart.setOnClickListener(v -> openAutostartSettings());
+        btnLogs.setOnClickListener(v -> startActivity(new Intent(this, LogActivity.class)));
     }
 
     @Override

@@ -17,7 +17,6 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -67,6 +66,14 @@ public class AdSkipService extends AccessibilityService {
     private static final int MAX_RETRIES = 4;   // 立即 + 60 + 120 + 180ms
     private static final long RETRY_INTERVAL_MS = 60;
 
+    // ===== 测试日志 =====
+    private SkipLogDb logDb;
+    // 上次点击的上下文（用于判定成功/失败）
+    private String lastClickPkg = "";
+    private String lastClickActivity = "";
+    private long lastClickRecordTime = 0;
+    private static final long RESULT_TIMEOUT_MS = 2000;  // 点击后 2s 内窗口切换视为成功
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
@@ -77,6 +84,26 @@ public class AdSkipService extends AccessibilityService {
         }
 
         String eventPkg = event.getPackageName() != null ? event.getPackageName().toString() : "";
+
+        // ===== 结果判定：点击后窗口切换且包名/Activity变化 → 跳过成功 =====
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                lastClickRecordTime > 0) {
+            long elapsed = System.currentTimeMillis() - lastClickRecordTime;
+            if (elapsed < RESULT_TIMEOUT_MS) {
+                String activity = event.getClassName() != null ? event.getClassName().toString() : "";
+                // 包名变了，或同包名但Activity变了 → 认为跳转成功
+                boolean pkgChanged = !eventPkg.equals(lastClickPkg);
+                boolean activityChanged = !activity.equals(lastClickActivity);
+                if (pkgChanged || activityChanged) {
+                    logDb.markLastClickResult(true);
+                    Log.d(TAG, "跳过成功: " + lastClickPkg + " -> " + eventPkg);
+                } else {
+                    logDb.markLastClickResult(false);
+                }
+                lastClickRecordTime = 0;
+            }
+        }
+
         if (eventPkg.equals(getPackageName()) ||
                 eventPkg.equals("com.android.systemui") ||
                 eventPkg.contains("launcher")) {
@@ -93,33 +120,58 @@ public class AdSkipService extends AccessibilityService {
         // 取消未执行的扫描，立即重新调度
         handler.removeCallbacks(scanRunnable);
         retryCount = 0;
-        scan();  // 立即扫描，零延迟
+        scan(eventPkg, eventType);  // 立即扫描，零延迟
     }
 
     /**
      * 立即扫描 + 快速重试
      */
-    private void scan() {
+    private void scan(String eventPkg, int eventType) {
         if (System.currentTimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) return;
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
+        if (root == null) {
+            // 记录：窗口树为空
+            logEvent(eventPkg, "", eventType, false, "none", false);
+            return;
+        }
 
         try {
             CharSequence rootPkg = root.getPackageName();
             if (rootPkg != null && rootPkg.toString().equals(getPackageName())) return;
 
+            String activity = root.getClassName() != null ? root.getClassName().toString() : "";
+
             AccessibilityNodeInfo skipNode = findSkipButton(root);
             if (skipNode != null) {
+                String matchType = lastMatchType;
                 performSafeClick(skipNode);
                 lastClickTime = System.currentTimeMillis();
                 handler.removeCallbacks(scanRunnable);
                 retryCount = 0;
-                Log.d(TAG, "点击跳过按钮: " + skipNode.getText());
+
+                // 记录点击 + 等待结果判定
+                logEvent(eventPkg, activity, eventType, true, matchType, true);
+                lastClickPkg = eventPkg;
+                lastClickActivity = activity;
+                lastClickRecordTime = System.currentTimeMillis();
+
+                // 2s 后如果还没被标记成功 → 标记失败
+                handler.postDelayed(() -> {
+                    if (lastClickRecordTime > 0) {
+                        logDb.markLastClickResult(false);
+                        lastClickRecordTime = 0;
+                    }
+                }, RESULT_TIMEOUT_MS);
+
+                Log.d(TAG, "点击跳过按钮: " + skipNode.getText() + " match=" + matchType);
                 return;
             }
 
-            // 没找到 → 快速重试（广告可能还在渲染）
+            // 没找到 → 记录 + 快速重试（广告可能还在渲染）
+            logEvent(eventPkg, activity, eventType, false, "none", false);
+            lastRetryPkg = eventPkg;
+            lastRetryEventType = eventType;
             if (retryCount < MAX_RETRIES) {
                 retryCount++;
                 handler.postDelayed(scanRunnable, RETRY_INTERVAL_MS);
@@ -129,12 +181,30 @@ public class AdSkipService extends AccessibilityService {
         }
     }
 
+    /**
+     * 记录日志（测试阶段）
+     */
+    private void logEvent(String pkg, String activity, int eventType,
+                          boolean found, String matchType, boolean clicked) {
+        try {
+            if (logDb == null) logDb = new SkipLogDb(this);
+            String eventName = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    ? "window_change" : "content_change";
+            logDb.insert(System.currentTimeMillis(), pkg, activity, eventName,
+                    found, matchType, clicked);
+        } catch (Exception ignored) {
+        }
+    }
+
     private final Runnable scanRunnable = new Runnable() {
         @Override
         public void run() {
-            scan();
+            scan(lastRetryPkg, lastRetryEventType);
         }
     };
+    private String lastRetryPkg = "";
+    private int lastRetryEventType = 0;
+    private String lastMatchType = "text";  // text / id / desc
 
     // ============================================================
     // 节点搜索（单次遍历 + 严格确认）
@@ -209,6 +279,7 @@ public class AdSkipService extends AccessibilityService {
 
     /**
      * 严格匹配：文本 / 描述 / ID 任一命中关键词即确认
+     * 记录匹配方式到 lastMatchType
      */
     private boolean matches(AccessibilityNodeInfo node) {
         CharSequence text = node.getText();
@@ -218,18 +289,18 @@ public class AdSkipService extends AccessibilityService {
         if (text != null && text.length() > 0 && text.length() <= 12) {
             String s = text.toString().trim();
             for (Pattern p : SKIP_PATTERNS) {
-                if (p.matcher(s).matches()) return true;
+                if (p.matcher(s).matches()) { lastMatchType = "text"; return true; }
             }
         }
         if (desc != null && desc.length() > 0 && desc.length() <= 12) {
             String s = desc.toString().trim();
             for (Pattern p : SKIP_PATTERNS) {
-                if (p.matcher(s).matches()) return true;
+                if (p.matcher(s).matches()) { lastMatchType = "desc"; return true; }
             }
         }
         if (viewId != null && !viewId.isEmpty()) {
             for (Pattern p : SKIP_ID_PATTERNS) {
-                if (p.matcher(viewId).matches()) return true;
+                if (p.matcher(viewId).matches()) { lastMatchType = "id"; return true; }
             }
         }
         return false;
@@ -330,6 +401,7 @@ public class AdSkipService extends AccessibilityService {
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
+        logDb = new SkipLogDb(this);
         startForegroundNotification();
         startHealthCheckService();
     }
