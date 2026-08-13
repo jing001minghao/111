@@ -1,6 +1,7 @@
 package com.adskip.app;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityWindowInfo;
 import android.accessibilityservice.GestureDescription;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -21,8 +22,12 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * 广告跳过无障碍服务 v1.5.0
- * 内置 SKIP 规则库 + 包含匹配：识别率大幅提升
+ * 广告跳过无障碍服务 v1.6.0
+ * 核心改进：
+ * 1. 去掉时间锁死，改基于窗口的去重（解决冷却期漏点）
+ * 2. 重试窗口延长到 800ms（覆盖慢渲染广告）
+ * 3. 多窗口扫描（覆盖悬浮广告层）
+ * 4. 窗口切换事件永不防抖
  */
 public class AdSkipService extends AccessibilityService {
 
@@ -32,21 +37,18 @@ public class AdSkipService extends AccessibilityService {
     private static final String PREFS_NAME = "adskip_prefs";
 
     // ==== 通用文本规则（包含匹配 + 长度限制，模仿 SKIP） ====
-    // 格式: {关键词, 最大长度, 是否仅限右上角区域}
-    // maxLen=0 表示不限长度（极少用）
     private static final String[][] TEXT_RULES = {
-            {"跳过", "8", "0"},        // 跳过/跳过广告/跳过5s/3s跳过...
-            {"关闭", "5", "0"},        // 关闭/关闭广告（爱奇艺）
-            {"进入首页", "6", "0"},    // VIVO 应用商店
+            {"跳过", "8", "0"},
+            {"关闭", "5", "0"},
+            {"进入首页", "6", "0"},
             {"立即体验", "6", "0"},
             {"知道了", "4", "0"},
             {"同意并继续", "7", "0"},
     };
 
-    // 纯倒计时文本（如 "3s"、"5 秒"）只在右上角区域才匹配，防止误触
     private static final Pattern COUNTDOWN_TEXT = Pattern.compile("^\\d+\\s*[s秒]?$");
 
-    // ==== 通用 ID 规则（结尾匹配，比全正则更稳） ====
+    // ==== 通用 ID 规则（结尾匹配） ====
     private static final String[] ID_RULES = {
             "skip", "count_down", "tv_time", "jump", "close",
             "ad_mark", "dismiss", "tt_splash", "gdt_ad", "vlion_ad",
@@ -54,17 +56,20 @@ public class AdSkipService extends AccessibilityService {
 
     // ==== 状态 ====
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private long lastClickTime = 0;
-    private static final long CLICK_COOLDOWN_MS = 1500;
 
-    // 内容变化防抖
-    private long lastEventTime = 0;
-    private static final long EVENT_DEBOUNCE_MS = 80;
+    // 同一窗口防重复点击（基于 pkg+activity+窗口id），不是全局时间锁
+    private String lastClickedKey = "";
+    private long lastClickedAt = 0;
+    private static final long KEY_COOLDOWN_MS = 2000;
 
-    // 快速重试
+    // 内容变化防抖（只对 content change，窗口切换永不防抖）
+    private long lastContentTime = 0;
+    private static final long CONTENT_DEBOUNCE_MS = 30;
+
+    // 快速重试：0 / 100 / 250 / 500 / 800ms，覆盖慢渲染广告
     private int retryCount = 0;
-    private static final int MAX_RETRIES = 4;   // 立即 + 60 + 120 + 180ms
-    private static final long RETRY_INTERVAL_MS = 60;
+    private static final int MAX_RETRIES = 5;
+    private static final long[] RETRY_DELAYS = {0, 100, 250, 500, 800};
 
     // ===== 测试日志 =====
     private SkipLogDb logDb;
@@ -84,7 +89,7 @@ public class AdSkipService extends AccessibilityService {
 
         String eventPkg = event.getPackageName() != null ? event.getPackageName().toString() : "";
 
-        // ===== 结果判定：点击后窗口切换且包名/Activity变化 → 跳过成功 =====
+        // ===== 结果判定：点击后窗口切换 → 跳过成功 =====
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                 lastClickRecordTime > 0 && logDb != null) {
             long elapsed = System.currentTimeMillis() - lastClickRecordTime;
@@ -108,59 +113,85 @@ public class AdSkipService extends AccessibilityService {
             return;
         }
 
+        // 窗口切换 → 永远触发扫描（不管防抖）
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            handler.removeCallbacks(scanRunnable);
+            retryCount = 0;
+            scan(eventPkg, eventType);
+            return;
+        }
+
+        // 内容变化 → 30ms 防抖
         long now = System.currentTimeMillis();
-        if (now - lastClickTime < CLICK_COOLDOWN_MS) return;
-
-        if (now - lastEventTime < EVENT_DEBOUNCE_MS) return;
-        lastEventTime = now;
-
+        if (now - lastContentTime < CONTENT_DEBOUNCE_MS) return;
+        lastContentTime = now;
         handler.removeCallbacks(scanRunnable);
         retryCount = 0;
         scan(eventPkg, eventType);
     }
 
     private void scan(String eventPkg, int eventType) {
-        if (System.currentTimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) return;
-
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
+        // 多窗口扫描：悬浮广告层也能覆盖
+        List<AccessibilityNodeInfo> roots = getApplicationWindowRoots();
+        if (roots.isEmpty()) {
             logEvent(eventPkg, "", eventType, false, "none", false);
+            // 根窗口还没就绪 → 重试
+            scheduleRetry(eventPkg, eventType);
             return;
         }
 
         try {
-            CharSequence rootPkg = root.getPackageName();
-            if (rootPkg != null && rootPkg.toString().equals(getPackageName())) return;
+            boolean foundAny = false;
+            for (AccessibilityNodeInfo root : roots) {
+                if (root == null) continue;
+                try {
+                    CharSequence rootPkg = root.getPackageName();
+                    if (rootPkg != null && rootPkg.toString().equals(getPackageName())) continue;
 
-            String activity = root.getClassName() != null ? root.getClassName().toString() : "";
+                    String activity = root.getClassName() != null ? root.getClassName().toString() : "";
+                    String windowKey = eventPkg + "|" + activity + "|" + System.identityHashCode(root);
 
-            AccessibilityNodeInfo skipNode = findSkipButton(root, eventPkg);
-            if (skipNode != null) {
-                String matchType = lastMatchType;
-                CharSequence nodeText = skipNode.getText();  // 先取文本，recycle 前
-                performSafeClick(skipNode);
-                skipNode.recycle();  // 释放节点，防止内存泄漏
-                lastClickTime = System.currentTimeMillis();
-                handler.removeCallbacks(scanRunnable);
-                retryCount = 0;
-
-                logEvent(eventPkg, activity, eventType, true, matchType, true);
-                lastClickPkg = eventPkg;
-                lastClickActivity = activity;
-                lastClickRecordTime = System.currentTimeMillis();
-
-                handler.postDelayed(() -> {
-                    if (lastClickRecordTime > 0 && logDb != null) {
-                        logDb.markLastClickResult(false);
-                        lastClickRecordTime = 0;
+                    // 同一窗口防重复：刚点过这个窗口就不点
+                    if (windowKey.equals(lastClickedKey) &&
+                            System.currentTimeMillis() - lastClickedAt < KEY_COOLDOWN_MS) {
+                        continue;
                     }
-                }, RESULT_TIMEOUT_MS);
 
-                Log.d(TAG, "点击跳过: " + nodeText + " [" + matchType + "]");
-                return;
+                    AccessibilityNodeInfo skipNode = findSkipButton(root, eventPkg);
+                    if (skipNode != null) {
+                        String matchType = lastMatchType;
+                        CharSequence nodeText = skipNode.getText();
+                        performSafeClick(skipNode);
+                        skipNode.recycle();
+
+                        lastClickedKey = windowKey;
+                        lastClickedAt = System.currentTimeMillis();
+                        handler.removeCallbacks(scanRunnable);
+                        retryCount = 0;
+
+                        logEvent(eventPkg, activity, eventType, true, matchType, true);
+                        lastClickPkg = eventPkg;
+                        lastClickActivity = activity;
+                        lastClickRecordTime = System.currentTimeMillis();
+                        handler.postDelayed(() -> {
+                            if (lastClickRecordTime > 0 && logDb != null) {
+                                logDb.markLastClickResult(false);
+                                lastClickRecordTime = 0;
+                            }
+                        }, RESULT_TIMEOUT_MS);
+
+                        Log.d(TAG, "点击跳过: " + nodeText + " [" + matchType + "] @ " + eventPkg);
+                        foundAny = true;
+                        break;
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "扫描窗口出错", e);
+                }
             }
 
-            // ===== App 专属坐标兜底（节点树选不中的按钮，如豆瓣） =====
+            if (foundAny) return;
+
+            // ===== App 专属坐标兜底（节点树选不中的按钮） =====
             AppRules.Rule rule = AppRules.findRule(eventPkg);
             if (rule != null && rule.bounds != null) {
                 int sw = getResources().getDisplayMetrics().widthPixels;
@@ -169,12 +200,11 @@ public class AdSkipService extends AccessibilityService {
                         (int) (rule.bounds[0] * sw), (int) (rule.bounds[1] * sh),
                         (int) (rule.bounds[2] * sw), (int) (rule.bounds[3] * sh));
                 performGestureClick(r.centerX(), r.centerY());
-                lastClickTime = System.currentTimeMillis();
                 handler.removeCallbacks(scanRunnable);
                 retryCount = 0;
-                logEvent(eventPkg, activity, eventType, true, "bounds", true);
+                logEvent(eventPkg, "", eventType, true, "bounds", true);
                 lastClickPkg = eventPkg;
-                lastClickActivity = activity;
+                lastClickActivity = "";
                 lastClickRecordTime = System.currentTimeMillis();
                 handler.postDelayed(() -> {
                     if (lastClickRecordTime > 0 && logDb != null) {
@@ -186,15 +216,55 @@ public class AdSkipService extends AccessibilityService {
                 return;
             }
 
-            logEvent(eventPkg, activity, eventType, false, "none", false);
-            lastRetryPkg = eventPkg;
-            lastRetryEventType = eventType;
-            if (retryCount < MAX_RETRIES) {
-                retryCount++;
-                handler.postDelayed(scanRunnable, RETRY_INTERVAL_MS);
-            }
+            logEvent(eventPkg, "", eventType, false, "none", false);
+            scheduleRetry(eventPkg, eventType);
         } finally {
-            root.recycle();
+            for (AccessibilityNodeInfo r : roots) {
+                if (r != null) r.recycle();
+            }
+        }
+    }
+
+    /**
+     * 获取所有应用窗口的根节点（多窗口，覆盖悬浮广告层）
+     */
+    private List<AccessibilityNodeInfo> getApplicationWindowRoots() {
+        List<AccessibilityNodeInfo> roots = new ArrayList<>();
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                List<AccessibilityWindowInfo> windows = getWindows();
+                for (AccessibilityWindowInfo w : windows) {
+                    if (w == null) continue;
+                    int type = w.getType();
+                    if (type == AccessibilityWindowInfo.TYPE_APPLICATION ||
+                            type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER) {
+                        AccessibilityNodeInfo root = w.getRoot();
+                        if (root != null) {
+                            roots.add(root);
+                            if (roots.size() >= 3) break;  // 最多扫3个窗口
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "获取窗口列表失败", e);
+        }
+
+        // 兜底：如果多窗口获取失败，用活动窗口
+        if (roots.isEmpty()) {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null) roots.add(root);
+        }
+        return roots;
+    }
+
+    private void scheduleRetry(String pkg, int eventType) {
+        if (retryCount < MAX_RETRIES) {
+            long delay = RETRY_DELAYS[retryCount];
+            retryCount++;
+            lastRetryPkg = pkg;
+            lastRetryEventType = eventType;
+            handler.postDelayed(scanRunnable, delay);
         }
     }
 
@@ -298,11 +368,13 @@ public class AdSkipService extends AccessibilityService {
                 return node;
             }
 
-            // 5. 通用 ID 规则（结尾匹配）
+            // 5. 通用 ID 规则（包含匹配）
+            // 注意：真实 ID 结构是 "包名:关键词_btn"，结尾可能是 _btn/_layout 等，
+            // 用 contains 而不是 endsWith（否则 tt_splash_skip_btn 永远匹配不到）
             if (!viewId.isEmpty()) {
                 String idLower = viewId.toLowerCase();
                 for (String id : ID_RULES) {
-                    if (idLower.endsWith(id) && isSmallEnough(bounds, sw, sh)) {
+                    if (idLower.contains(id) && isSmallEnough(bounds, sw, sh)) {
                         lastMatchType = "id";
                         recycleOthers(candidates, node);
                         return node;
@@ -371,7 +443,7 @@ public class AdSkipService extends AccessibilityService {
         AccessibilityNodeInfo ancestor = findSafeClickableAncestor(node);
         if (ancestor != null) {
             boolean clicked = ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            ancestor.recycle();  // 无论成功失败都要回收，防止内存泄漏
+            ancestor.recycle();
             if (clicked) {
                 return;
             }
